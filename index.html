@@ -1,1 +1,1238 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Relativity Control Panel</title>
 
+<link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Exo+2:wght@300;400;600;800&display=swap" rel="stylesheet" />
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+
+<!-- Firebase SDK -->
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+  import { getDatabase, ref, set, onValue } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
+
+  // 🔧 PASTE YOUR FIREBASE CONFIG HERE
+ const firebaseConfig = {
+  apiKey: "AIzaSyDC4ANJ7A2b0ZlMbZb6KvqU0rtxkejs84Q",
+  authDomain: "relativity-simulator.firebaseapp.com",
+  databaseURL: "https://relativity-simulator-default-rtdb.asia-southeast1.firebasedatabase.app",
+  projectId: "relativity-simulator",
+  storageBucket: "relativity-simulator.firebasestorage.app",
+  messagingSenderId: "526676250030",
+  appId: "1:526676250030:web:4ddeda9f7b2bc099d08c3f",
+  measurementId: "G-W1H7YH590R"
+};
+
+  const app = initializeApp(firebaseConfig);
+  const db  = getDatabase(app);
+  const relRef = ref(db, "/relativity");
+
+  // Dashboard only writes the command — ESP32 calculates everything else
+  window.sendCommand = async (cmd) => {
+    try {
+      await set(ref(db, "/relativity/command"), cmd);
+    } catch { showToast("Firebase write failed — check config", "error"); }
+  };
+
+  // Dashboard only READS values — all calculated by ESP32
+  onValue(relRef, (snap) => {
+    const d = snap.val(); if (!d) return;
+    if (d.speed     !== undefined) updateDisplay("val-speed", (+d.speed).toFixed(4));
+    if (d.earthTime !== undefined) updateDisplay("val-earth", (+d.earthTime).toFixed(3));
+    if (d.relTime   !== undefined) updateDisplay("val-rel",   (+d.relTime).toFixed(3));
+    if (d.gamma     !== undefined) updateDisplay("val-gamma", (+d.gamma).toFixed(4));
+    if (d.command   !== undefined) updateMode(d.command);
+    if (d.earthTime !== undefined && d.relTime !== undefined) {
+      pushGraph(d.earthTime - d.relTime);
+      updateTwinClocks(+d.earthTime, +d.relTime);
+    }
+    setConnected(true);
+  }, () => showToast("Firebase connection failed", "error"));
+</script>
+
+<style>
+:root {
+  --bg:          #040810;
+  --surface:     #07111e;
+  --panel:       #091624;
+  --border:      #0d2540;
+  --glow-blue:   #00b4ff;
+  --glow-cyan:   #00ffe5;
+  --glow-orange: #ff7b00;
+  --glow-red:    #ff3060;
+  --text:        #c8dff5;
+  --text-dim:    #4a6a8a;
+  --font-mono:   'Share Tech Mono', monospace;
+  --font-ui:     'Exo 2', sans-serif;
+  --r:           6px;
+}
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  background: var(--bg); color: var(--text);
+  font-family: var(--font-ui); min-height: 100vh;
+  overflow-x: hidden; position: relative;
+}
+body::before {
+  content: ''; position: fixed; inset: 0;
+  background-image:
+    linear-gradient(rgba(0,180,255,0.04) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(0,180,255,0.04) 1px, transparent 1px);
+  background-size: 40px 40px;
+  animation: gridScroll 20s linear infinite;
+  pointer-events: none; z-index: 0;
+}
+body::after {
+  content: ''; position: fixed; inset: 0;
+  background: radial-gradient(ellipse at center, transparent 50%, rgba(4,8,16,0.85) 100%);
+  pointer-events: none; z-index: 0;
+}
+@keyframes gridScroll { to { background-position: 40px 40px; } }
+
+/* ═══════════════════════════════════════
+   ROCKET SCENE
+═══════════════════════════════════════ */
+.scene {
+  position: relative; width: 100%; height: 170px;
+  overflow: hidden; margin-bottom: 8px;
+  border: 1px solid var(--border); border-radius: var(--r);
+  background: linear-gradient(180deg, #020608 0%, #040c14 100%);
+}
+
+/* Rocket wrapper — JS moves left position */
+#rocket-wrap {
+  position: absolute;
+  top: 50%;
+  left: 10%;
+  transform: translateY(-50%);
+  width: 160px;
+  will-change: left, transform;
+  filter: drop-shadow(0 0 8px rgba(0,180,255,0.5));
+}
+
+/* Rocket tilt — pitch up on acc, pitch down on dec */
+@keyframes tiltAcc   { to { transform: translateY(calc(-50% - 10px)) rotate(-12deg); } }
+@keyframes tiltDec   { to { transform: translateY(calc(-50% + 10px)) rotate(10deg);  } }
+@keyframes tiltLevel { to { transform: translateY(-50%) rotate(0deg); } }
+@keyframes resetPop  { 0%{opacity:1} 40%{opacity:0.1} 100%{opacity:1} }
+
+.scene.mode-acc   #rocket-wrap { animation: tiltAcc   0.5s ease forwards; }
+.scene.mode-dec   #rocket-wrap { animation: tiltDec   0.5s ease forwards; }
+.scene.mode-const #rocket-wrap { animation: tiltLevel 0.5s ease forwards; }
+.scene.mode-reset #rocket-wrap { animation: tiltLevel 0.4s ease forwards, resetPop 0.5s ease; }
+.scene.mode-idle  #rocket-wrap { animation: tiltLevel 0.5s ease forwards; }
+
+/* Flame flicker — horizontal pulse */
+@keyframes flickerBig   { from{transform:scaleX(1)   scaleY(1)}    to{transform:scaleX(1.3) scaleY(0.85)} }
+@keyframes flickerSmall { from{transform:scaleX(0.7) scaleY(0.7)}  to{transform:scaleX(1.2) scaleY(0.5)}  }
+
+#fl-outer { transform-origin: 100% 50%; animation: flickerBig   0.11s ease-in-out infinite alternate; }
+#fl-inner { transform-origin: 100% 50%; animation: flickerSmall 0.08s ease-in-out infinite alternate; }
+
+/* Flame opacity by mode */
+.scene.mode-acc   #fl-outer { opacity: 1;    }
+.scene.mode-acc   #fl-inner { opacity: 1;    }
+.scene.mode-const #fl-outer { opacity: 0.55; }
+.scene.mode-const #fl-inner { opacity: 0.5;  }
+.scene.mode-dec   #fl-outer { opacity: 0.2;  }
+.scene.mode-dec   #fl-inner { opacity: 0.15; }
+.scene.mode-reset #fl-outer, .scene.mode-idle #fl-outer { opacity: 0; }
+.scene.mode-reset #fl-inner, .scene.mode-idle #fl-inner { opacity: 0; }
+
+/* Speed streaks */
+.streak {
+  position: absolute; height: 1px; right: 0;
+  background: linear-gradient(90deg, transparent, rgba(0,180,255,0.5), transparent);
+  opacity: 0;
+}
+.scene.mode-acc   .streak { animation: streakAcc   var(--dur) linear infinite var(--delay); }
+.scene.mode-const .streak { animation: streakConst var(--dur) linear infinite var(--delay); }
+.scene.mode-dec   .streak { animation: streakDec   var(--dur) linear infinite var(--delay); }
+
+@keyframes streakAcc   { 0%{opacity:0;width:0;right:0}  25%{opacity:0.9;width:140px} 100%{opacity:0;width:220px;right:100%} }
+@keyframes streakConst { 0%{opacity:0;width:0;right:0}  25%{opacity:0.5;width:90px}  100%{opacity:0;width:160px;right:100%} }
+@keyframes streakDec   { 0%{opacity:0;width:0;right:0}  25%{opacity:0.2;width:40px}  100%{opacity:0;width:70px; right:100%} }
+
+/* Exhaust dots — trail LEFT behind rocket */
+.ex-dot {
+  position: absolute;
+  top: 50%;
+  width: 10px; height: 10px; border-radius: 50%;
+  background: radial-gradient(circle, #ffc060, #ff3000);
+  opacity: 0; pointer-events: none;
+  transform: translateY(-50%);
+}
+.scene.mode-acc .ex-dot {
+  animation: exPop 0.28s ease-out infinite;
+}
+@keyframes exPop {
+  0%  { opacity: 0.95; transform: translateY(-50%) scale(1); }
+  100%{ opacity: 0;    transform: translateY(-50%) scale(2.2) translateX(-12px); }
+}
+
+/* ═══════════════════════════════════════
+   LAYOUT
+═══════════════════════════════════════ */
+.wrapper {
+  position: relative; z-index: 1;
+  max-width: 1100px; margin: 0 auto; padding: 24px 16px 40px;
+}
+
+header { text-align: center; margin-bottom: 18px; }
+h1 {
+  font-family: var(--font-ui); font-weight: 800;
+  font-size: clamp(24px, 5vw, 44px); letter-spacing: -0.5px;
+  background: linear-gradient(135deg, #fff 30%, var(--glow-blue) 70%, var(--glow-cyan));
+  -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;
+  line-height: 1.1; margin-bottom: 8px;
+}
+.header-sub { font-family: var(--font-mono); font-size: 12px; color: var(--text-dim); letter-spacing: 2px; }
+
+.mode-bar { display:flex; align-items:center; justify-content:center; gap:10px; margin-bottom:16px; }
+.mode-label { font-family: var(--font-mono); font-size:11px; color:var(--text-dim); letter-spacing:2px; }
+.mode-badge {
+  font-family:var(--font-mono); font-weight:bold; font-size:14px;
+  letter-spacing:3px; padding:5px 18px; border-radius:var(--r);
+  border:1px solid var(--glow-blue); color:var(--glow-blue);
+  background:rgba(0,180,255,0.1); transition:all .3s ease;
+  text-shadow:0 0 10px rgba(0,180,255,0.5);
+}
+.mode-badge.acc   { border-color:var(--glow-cyan);   color:var(--glow-cyan);   background:rgba(0,255,229,0.08); text-shadow:0 0 10px rgba(0,255,229,.5); }
+.mode-badge.dec   { border-color:var(--glow-orange); color:var(--glow-orange); background:rgba(255,123,0,0.08);  text-shadow:0 0 10px rgba(255,123,0,.5); }
+.mode-badge.const { border-color:var(--glow-blue);   color:var(--glow-blue);   background:rgba(0,180,255,0.08); }
+.mode-badge.idle  { border-color:var(--text-dim);    color:var(--text-dim);    background:rgba(74,106,138,0.08); text-shadow:none; }
+
+.grid { display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-bottom:16px; }
+@media(max-width:640px){ .grid{ grid-template-columns:1fr; } }
+
+/* ── Card base ── */
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  padding: 22px;
+  position: relative;
+  overflow: hidden;
+  transition: border-color 0.3s ease;
+}
+.card::before {
+  content:''; position:absolute; top:0; left:0; right:0; height:2px;
+  background: linear-gradient(90deg, transparent, var(--glow-blue), transparent);
+  opacity: 0.6;
+}
+/* Telemetry card — cyan accent */
+.card-telemetry { border-color: rgba(0,255,229,0.2); }
+.card-telemetry::before { background: linear-gradient(90deg, transparent, var(--glow-cyan), transparent); }
+
+/* Controls card — blue accent */
+.card-controls { border-color: rgba(0,180,255,0.2); }
+.card-controls::before { background: linear-gradient(90deg, transparent, var(--glow-blue), transparent); }
+
+/* Chart card — purple accent */
+.card-chart::before { background: linear-gradient(90deg, transparent, #c084fc, transparent); }
+
+/* ── Card title ── */
+.card-title {
+  font-family: var(--font-ui);
+  font-weight: 800;
+  font-size: 13px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--text);
+  margin-bottom: 18px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.card-title .ct-icon {
+  font-size: 16px;
+  line-height: 1;
+}
+.card-title .ct-tag {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: normal;
+  color: var(--text-dim);
+  letter-spacing: 2px;
+  margin-left: auto;
+  border: 1px solid var(--border);
+  padding: 2px 8px;
+  border-radius: 3px;
+}
+
+/* ── Stat boxes ── */
+.stats-grid { display:grid; grid-template-columns:1fr 1fr 1fr 1fr; gap:12px; }
+@media(max-width:500px){ .stats-grid{ grid-template-columns:1fr 1fr; } }
+
+.stat-box {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  padding: 16px 10px 12px;
+  text-align: center;
+  position: relative;
+  overflow: hidden;
+  transition: border-color 0.3s, box-shadow 0.3s;
+}
+.stat-box::after {
+  content: '';
+  position: absolute;
+  bottom: 0; left: 0; right: 0;
+  height: 2px;
+  border-radius: 0 0 var(--r) var(--r);
+  opacity: 0.6;
+}
+.stat-box:nth-child(1)::after { background: var(--glow-cyan); }
+.stat-box:nth-child(2)::after { background: var(--glow-blue); }
+.stat-box:nth-child(3)::after { background: var(--glow-orange); }
+.stat-box:nth-child(4)::after { background: #c084fc; }
+
+.stat-box:hover {
+  border-color: rgba(0,180,255,0.3);
+  box-shadow: 0 4px 20px -8px rgba(0,180,255,0.3);
+}
+
+.stat-icon {
+  font-size: 16px;
+  margin-bottom: 6px;
+  display: block;
+}
+.stat-label {
+  font-family: var(--font-mono);
+  font-size: 8px;
+  letter-spacing: 2.5px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  margin-bottom: 10px;
+}
+.stat-value {
+  font-family: var(--font-mono);
+  font-size: clamp(18px, 3vw, 26px);
+  font-weight: bold;
+  line-height: 1;
+  transition: all 0.2s ease;
+}
+.stat-value.speed-val { color:var(--glow-cyan);   text-shadow:0 0 16px rgba(0,255,229,.5); }
+.stat-value.earth-val { color:var(--glow-blue);   text-shadow:0 0 16px rgba(0,180,255,.5); }
+.stat-value.rel-val   { color:var(--glow-orange); text-shadow:0 0 16px rgba(255,123,0,.5);  }
+.stat-value.gamma-val { color:#c084fc;            text-shadow:0 0 16px rgba(192,132,252,.5); }
+.stat-unit {
+  font-family: var(--font-mono);
+  font-size: 8px;
+  color: var(--text-dim);
+  margin-top: 6px;
+  letter-spacing: 1px;
+}
+
+/* value flash on update */
+@keyframes valFlash {
+  0%   { opacity: 1; }
+  30%  { opacity: 0.4; }
+  100% { opacity: 1; }
+}
+.stat-value.flash { animation: valFlash 0.25s ease; }
+
+/* ── Buttons ── */
+.btn-grid { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+.ctrl-btn {
+  position: relative; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 6px;
+  padding: 18px 10px 14px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  cursor: pointer;
+  font-family: var(--font-ui);
+  font-weight: 800;
+  font-size: 14px;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  color: var(--text);
+  transition: all 0.2s ease;
+  overflow: hidden;
+  outline: none;
+}
+.ctrl-btn .btn-icon {
+  font-size: 24px;
+  line-height: 1;
+  transition: transform 0.2s ease;
+}
+.ctrl-btn .btn-label {
+  font-family: var(--font-ui);
+  font-weight: 800;
+  font-size: 13px;
+  letter-spacing: 1px;
+}
+.ctrl-btn .btn-key {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  color: var(--text-dim);
+  letter-spacing: 2px;
+  border: 1px solid var(--border);
+  padding: 1px 6px;
+  border-radius: 3px;
+  transition: all 0.2s ease;
+}
+.ctrl-btn::after { content:''; position:absolute; inset:0; opacity:0; transition:opacity 0.2s; }
+
+.btn-start { --c: var(--glow-cyan); }
+.btn-stop  { --c: var(--glow-blue); }
+.btn-back  { --c: var(--glow-orange); }
+.btn-reset { --c: var(--glow-red); }
+
+.ctrl-btn:hover {
+  border-color: var(--c);
+  color: var(--c);
+  background: rgba(0,0,0,0.5);
+  box-shadow: 0 0 24px -6px var(--c), inset 0 0 20px -10px var(--c);
+  transform: translateY(-2px);
+}
+.ctrl-btn:hover .btn-icon { transform: scale(1.2); }
+.ctrl-btn:hover .btn-key  { border-color: var(--c); color: var(--c); }
+
+.ctrl-btn.active {
+  border-color: var(--c);
+  color: var(--c);
+  background: rgba(0,0,0,0.5);
+  box-shadow: 0 0 30px -6px var(--c), inset 0 0 25px -8px rgba(0,0,0,0.5);
+}
+.ctrl-btn.active::after {
+  background: linear-gradient(135deg, var(--c) 0%, transparent 65%);
+  opacity: 0.08;
+}
+.ctrl-btn.active .btn-key { border-color: var(--c); color: var(--c); }
+.ctrl-btn:active { transform: scale(0.96); }
+
+/* ── Chart card ── */
+.chart-card { grid-column:1/-1; }
+.chart-wrapper { position:relative; height:200px; }
+.chart-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 14px;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.chart-title-text {
+  font-family: var(--font-ui);
+  font-weight: 800;
+  font-size: 13px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--text);
+}
+.chart-formula {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-dim);
+  letter-spacing: 1px;
+  border: 1px solid var(--border);
+  padding: 3px 10px;
+  border-radius: 3px;
+}
+.chart-hint {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  color: var(--text-dim);
+  text-align: center;
+  margin-top: 10px;
+  letter-spacing: 1px;
+}
+
+/* ── Info chips ── */
+.info-row {
+  display: flex; align-items: center; justify-content: center;
+  gap: 12px; margin-top: 16px; flex-wrap: wrap;
+}
+.info-chip {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 6px 14px;
+  letter-spacing: 1px;
+  background: var(--surface);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+.info-chip:hover {
+  border-color: rgba(0,255,229,0.3);
+  box-shadow: 0 0 10px -4px var(--glow-cyan);
+}
+.info-chip .chip-label { color: var(--text-dim); }
+.info-chip .chip-val   { color: var(--glow-cyan); font-weight: bold; }
+
+#toast {
+  position:fixed; bottom:24px; left:50%;
+  transform:translateX(-50%) translateY(20px);
+  font-family:var(--font-mono); font-size:11px; padding:8px 20px;
+  border-radius:var(--r); background:var(--surface); border:1px solid var(--border);
+  color:var(--text); opacity:0; pointer-events:none; transition:all .3s ease; z-index:999;
+}
+#toast.show  { opacity:1; transform:translateX(-50%) translateY(0); }
+#toast.error { border-color:var(--glow-red); color:var(--glow-red); }
+
+.scanlines {
+  position:fixed; inset:0;
+  background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,.04) 2px,rgba(0,0,0,.04) 4px);
+  pointer-events:none; z-index:2;
+}
+
+/* Connection status */
+.conn-bar { display:flex; align-items:center; justify-content:center; gap:8px; margin-bottom:12px; }
+.conn-dot { width:8px; height:8px; border-radius:50%; background:var(--text-dim); transition:all .4s ease; }
+.conn-dot.live { background:#22c55e; box-shadow:0 0 8px #22c55e; animation:connPulse 1.5s ease-in-out infinite; }
+.conn-dot.waiting { background:var(--glow-orange); box-shadow:0 0 6px var(--glow-orange); }
+.conn-text { font-family:var(--font-mono); font-size:10px; color:var(--text-dim); letter-spacing:2px; }
+@keyframes connPulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+
+/* ═══════════════════════════════════════
+   TWIN PARADOX CLOCKS
+═══════════════════════════════════════ */
+.twin-card { grid-column: 1 / -1; }
+
+.twin-wrap {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  gap: 16px;
+}
+@media(max-width:500px) {
+  .twin-wrap { grid-template-columns: 1fr 1fr; }
+  .twin-divider { display: none; }
+}
+
+/* Individual clock panel */
+.clock-panel {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  padding: 8px 0;
+}
+
+.clock-label {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 3px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+}
+
+/* SVG analog clock face */
+.clock-face-wrap { position: relative; }
+.clock-svg { overflow: visible; }
+
+/* Clock digit readout below face */
+.clock-digital {
+  font-family: var(--font-mono);
+  font-size: 18px;
+  font-weight: bold;
+  letter-spacing: 2px;
+  text-align: center;
+  transition: color 0.3s ease;
+}
+.clock-digital.earth-clk { color: var(--glow-blue);   text-shadow: 0 0 14px rgba(0,180,255,0.5); }
+.clock-digital.rocket-clk { color: var(--glow-orange); text-shadow: 0 0 14px rgba(255,123,0,0.5);  }
+
+.clock-sub {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  color: var(--text-dim);
+  letter-spacing: 1px;
+  text-align: center;
+}
+
+/* Delta readout in the middle */
+.twin-divider {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+.delta-label {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  color: var(--text-dim);
+  letter-spacing: 2px;
+}
+.delta-value {
+  font-family: var(--font-mono);
+  font-size: 22px;
+  font-weight: bold;
+  color: #c084fc;
+  text-shadow: 0 0 14px rgba(192,132,252,0.5);
+  transition: all 0.3s ease;
+}
+.delta-unit {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  color: var(--text-dim);
+  letter-spacing: 1px;
+}
+
+/* Divergence bar */
+.diverge-bar-wrap {
+  width: 100%;
+  margin-top: 4px;
+}
+.diverge-bar-track {
+  width: 100%;
+  height: 4px;
+  background: var(--panel);
+  border-radius: 2px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+}
+.diverge-bar-fill {
+  height: 100%;
+  width: 0%;
+  background: linear-gradient(90deg, var(--glow-blue), #c084fc, var(--glow-orange));
+  border-radius: 2px;
+  transition: width 0.4s ease;
+}
+.diverge-label {
+  font-family: var(--font-mono);
+  font-size: 8px;
+  color: var(--text-dim);
+  text-align: center;
+  margin-top: 4px;
+  letter-spacing: 1px;
+}
+
+/* Slow-mo pulse on rocket clock when dilating hard */
+@keyframes dilationPulse {
+  0%,100% { box-shadow: 0 0 0 0 rgba(255,123,0,0); }
+  50%     { box-shadow: 0 0 0 6px rgba(255,123,0,0.15); }
+}
+.dilating { animation: dilationPulse 1s ease-in-out infinite; border-radius: 50%; }
+</style>
+</head>
+<body>
+<div class="scanlines"></div>
+
+<div class="wrapper">
+
+  <!-- Header (no badge) -->
+  <header>
+    <h1>Relativity Control Panel</h1>
+    <div class="header-sub">SPECIAL RELATIVITY · LORENTZ TIME DILATION · LIVE TELEMETRY</div>
+  </header>
+
+  <!-- ══════════════ ROCKET SCENE ══════════════ -->
+  <div class="scene mode-idle" id="scene">
+    <!-- stars + streaks + exhaust injected by JS -->
+
+    <!-- Exhaust dots -->
+    <div class="ex-dot" id="ex1" style="animation-delay:0s"></div>
+    <div class="ex-dot" id="ex2" style="animation-delay:0.06s"></div>
+    <div class="ex-dot" id="ex3" style="animation-delay:0.12s"></div>
+    <div class="ex-dot" id="ex4" style="animation-delay:0.18s"></div>
+
+    <!-- The rocket (horizontal, nose → right, flame ← left) -->
+    <div id="rocket-wrap">
+      <svg viewBox="0 0 160 48" xmlns="http://www.w3.org/2000/svg" width="160" height="48">
+        <defs>
+          <linearGradient id="bodyG" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%"   stop-color="#0d2e50"/>
+            <stop offset="50%"  stop-color="#1a5a9a"/>
+            <stop offset="100%" stop-color="#0d2e50"/>
+          </linearGradient>
+          <linearGradient id="noseG" x1="0" y1="0" x2="1" y2="0">
+            <stop offset="0%"   stop-color="#1a5a9a"/>
+            <stop offset="100%" stop-color="#00b4ff" stop-opacity="0.3"/>
+          </linearGradient>
+          <!-- Flame goes LEFT from nozzle -->
+          <linearGradient id="flOut" x1="1" y1="0" x2="0" y2="0">
+            <stop offset="0%"   stop-color="#ff6a00"/>
+            <stop offset="50%"  stop-color="#ff3300" stop-opacity="0.6"/>
+            <stop offset="100%" stop-color="#ff000000"/>
+          </linearGradient>
+          <linearGradient id="flIn" x1="1" y1="0" x2="0" y2="0">
+            <stop offset="0%"   stop-color="#fffaaa"/>
+            <stop offset="60%"  stop-color="#ffcc00"/>
+            <stop offset="100%" stop-color="#ff440000"/>
+          </linearGradient>
+        </defs>
+
+        <!-- ── Outer flame (left of nozzle) ── -->
+        <g id="fl-outer" opacity="0">
+          <ellipse cx="22" cy="24" rx="22" ry="9" fill="url(#flOut)"/>
+        </g>
+        <!-- ── Inner flame ── -->
+        <g id="fl-inner" opacity="0">
+          <ellipse cx="26" cy="24" rx="14" ry="5" fill="url(#flIn)"/>
+        </g>
+
+        <!-- ── Nozzle bell ── -->
+        <path d="M42,18 L34,14 L34,34 L42,30 Z" fill="#040f1c" stroke="#00b4ff" stroke-width="0.6" stroke-opacity="0.5"/>
+
+        <!-- ── Main body ── -->
+        <rect x="42" y="14" width="72" height="20" rx="4" fill="url(#bodyG)" stroke="#00b4ff" stroke-width="0.7" stroke-opacity="0.5"/>
+
+        <!-- ── Nose cone (pointing right) ── -->
+        <path d="M114,14 L114,34 L148,24 Z" fill="url(#noseG)" stroke="#00b4ff" stroke-width="0.7" stroke-opacity="0.6"/>
+
+        <!-- ── Cockpit window ── -->
+        <ellipse cx="118" cy="24" rx="7" ry="6" fill="#030d18" stroke="#00ffe5" stroke-width="0.9"/>
+        <ellipse cx="118" cy="24" rx="4"  ry="3.5" fill="#00b4ff" opacity="0.2"/>
+        <ellipse cx="116" cy="22" rx="2"  ry="1.3" fill="white" opacity="0.35"/>
+
+        <!-- ── Body detail lines ── -->
+        <line x1="70"  y1="14" x2="70"  y2="34" stroke="#00b4ff" stroke-width="0.4" stroke-opacity="0.25"/>
+        <line x1="90"  y1="14" x2="90"  y2="34" stroke="#00b4ff" stroke-width="0.4" stroke-opacity="0.25"/>
+        <line x1="108" y1="14" x2="108" y2="34" stroke="#00b4ff" stroke-width="0.4" stroke-opacity="0.25"/>
+
+        <!-- ── Top fin ── -->
+        <path d="M80,14 L74,4 L95,14 Z"  fill="#061828" stroke="#00b4ff" stroke-width="0.6" stroke-opacity="0.5"/>
+        <!-- ── Bottom fin ── -->
+        <path d="M80,34 L74,44 L95,34 Z" fill="#061828" stroke="#00b4ff" stroke-width="0.6" stroke-opacity="0.5"/>
+
+        <!-- ── Accent lights ── -->
+        <circle cx="60"  cy="20" r="1.6" fill="#00ffe5" opacity="0.8"/>
+        <circle cx="60"  cy="28" r="1.6" fill="#00ffe5" opacity="0.8"/>
+        <circle cx="100" cy="20" r="1.6" fill="#00ffe5" opacity="0.6"/>
+        <circle cx="100" cy="28" r="1.6" fill="#00ffe5" opacity="0.6"/>
+      </svg>
+    </div>
+  </div>
+
+  <!-- Connection Status -->
+  <div class="conn-bar">
+    <div class="conn-dot waiting" id="conn-dot"></div>
+    <span class="conn-text" id="conn-text">WAITING FOR ESP32</span>
+  </div>
+
+  <!-- Mode Bar -->
+  <div class="mode-bar">
+    <span class="mode-label">CURRENT MODE</span>
+    <div class="mode-badge idle" id="mode-badge">IDLE</div>
+  </div>
+
+  <!-- Main Grid -->
+  <div class="grid">
+
+    <!-- Telemetry -->
+    <div class="card card-telemetry">
+      <div class="card-title">
+        <span class="ct-icon">📡</span>
+        Live Telemetry
+        <span class="ct-tag">ESP32 → FIREBASE</span>
+      </div>
+      <div class="stats-grid">
+        <div class="stat-box">
+          <span class="stat-icon">⚡</span>
+          <div class="stat-label">Velocity</div>
+          <div class="stat-value speed-val" id="val-speed">—</div>
+          <div class="stat-unit">v / c</div>
+        </div>
+        <div class="stat-box">
+          <span class="stat-icon">🌍</span>
+          <div class="stat-label">Earth Time</div>
+          <div class="stat-value earth-val" id="val-earth">—</div>
+          <div class="stat-unit">seconds</div>
+        </div>
+        <div class="stat-box">
+          <span class="stat-icon">🚀</span>
+          <div class="stat-label">Rocket Time</div>
+          <div class="stat-value rel-val" id="val-rel">—</div>
+          <div class="stat-unit">seconds</div>
+        </div>
+        <div class="stat-box">
+          <span class="stat-icon">γ</span>
+          <div class="stat-label">Lorentz Factor</div>
+          <div class="stat-value gamma-val" id="val-gamma">—</div>
+          <div class="stat-unit">γ = 1/√(1−v²)</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Controls -->
+    <div class="card card-controls">
+      <div class="card-title">
+        <span class="ct-icon">🎮</span>
+        Command Interface
+        <span class="ct-tag">SEND TO ESP32</span>
+      </div>
+      <div class="btn-grid">
+        <button class="ctrl-btn btn-start" id="btn-start" onclick="handleCommand('accelerate')">
+          <span class="btn-icon">▲</span>
+          <span class="btn-label">Accelerate</span>
+          <span class="btn-key">ACC</span>
+        </button>
+        <button class="ctrl-btn btn-stop" id="btn-stop" onclick="handleCommand('constant')">
+          <span class="btn-icon">■</span>
+          <span class="btn-label">Hold Speed</span>
+          <span class="btn-key">CONST</span>
+        </button>
+        <button class="ctrl-btn btn-back" id="btn-back" onclick="handleCommand('decelerate')">
+          <span class="btn-icon">▼</span>
+          <span class="btn-label">Decelerate</span>
+          <span class="btn-key">DEC</span>
+        </button>
+        <button class="ctrl-btn btn-reset" id="btn-reset" onclick="handleCommand('reset')">
+          <span class="btn-icon">↺</span>
+          <span class="btn-label">Reset All</span>
+          <span class="btn-key">RST</span>
+        </button>
+      </div>
+    </div>
+
+    <!-- Graph -->
+    <div class="card chart-card card-chart">
+      <div class="chart-header">
+        <div class="chart-title-text">📈 &nbsp;Time Divergence Plot</div>
+        <div class="chart-formula">Δt = t<sub>earth</sub> − t<sub>rel</sub> &nbsp;·&nbsp; Last 50 samples</div>
+      </div>
+      <div class="chart-wrapper">
+        <canvas id="timeDiffChart"></canvas>
+      </div>
+      <div class="chart-hint">Higher speed → slower rocket time &nbsp;|&nbsp; γ = 1/√(1−v²/c²)</div>
+    </div>
+
+    <!-- Twin Paradox Clocks -->
+    <div class="card twin-card">
+      <div class="card-title">
+        <span class="ct-icon">⏱️</span>
+        Twin Paradox Visualizer
+        <span class="ct-tag">LIVE · TWO CLOCKS</span>
+      </div>
+      <div class="twin-wrap">
+
+        <!-- Earth Clock -->
+        <div class="clock-panel">
+          <div class="clock-label">🌍 &nbsp; Earth Observer</div>
+          <div class="clock-face-wrap">
+            <svg class="clock-svg" id="earth-clock-svg" width="110" height="110" viewBox="-55 -55 110 110">
+              <!-- Face -->
+              <circle r="50" fill="#07111e" stroke="#00b4ff" stroke-width="1.5" stroke-opacity="0.6"/>
+              <circle r="48" fill="none" stroke="#00b4ff" stroke-width="0.3" stroke-opacity="0.2"/>
+              <!-- Tick marks -->
+              <g id="earth-ticks"></g>
+              <!-- Center dot -->
+              <circle r="3" fill="#00b4ff"/>
+              <!-- Hands -->
+              <line id="earth-hour"   x1="0" y1="0" x2="0" y2="-28" stroke="#00b4ff" stroke-width="3"   stroke-linecap="round"/>
+              <line id="earth-minute" x1="0" y1="0" x2="0" y2="-38" stroke="#00ffe5" stroke-width="2"   stroke-linecap="round"/>
+              <line id="earth-second" x1="0" y1="4" x2="0" y2="-44" stroke="#ff3060" stroke-width="1"   stroke-linecap="round"/>
+              <circle r="2" fill="#ff3060"/>
+            </svg>
+          </div>
+          <div class="clock-digital earth-clk" id="earth-digital">00:00:00.0</div>
+          <div class="clock-sub">Normal Time Flow</div>
+          <div class="diverge-bar-wrap">
+            <div class="diverge-bar-track">
+              <div class="diverge-bar-fill" id="earth-bar" style="width:50%"></div>
+            </div>
+            <div class="diverge-label">RELATIVE PROGRESS</div>
+          </div>
+        </div>
+
+        <!-- Middle delta -->
+        <div class="twin-divider">
+          <div class="delta-label">TIME GAINED</div>
+          <div class="delta-value" id="twin-delta">+0.000</div>
+          <div class="delta-unit">seconds</div>
+          <div style="margin-top:10px; font-family:var(--font-mono); font-size:9px; color:var(--text-dim); text-align:center; line-height:1.7;">
+            Earth twin<br>ages faster<br>by this much
+          </div>
+        </div>
+
+        <!-- Rocket Clock -->
+        <div class="clock-panel">
+          <div class="clock-label">🚀 &nbsp; Rocket Traveller</div>
+          <div class="clock-face-wrap">
+            <svg class="clock-svg" id="rocket-clock-svg" width="110" height="110" viewBox="-55 -55 110 110">
+              <!-- Face -->
+              <circle r="50" fill="#07111e" stroke="#ff7b00" stroke-width="1.5" stroke-opacity="0.6"/>
+              <circle r="48" fill="none" stroke="#ff7b00" stroke-width="0.3" stroke-opacity="0.2"/>
+              <!-- Tick marks -->
+              <g id="rocket-ticks"></g>
+              <!-- Dilation glow ring — pulses when dilating hard -->
+              <circle id="dilation-ring" r="50" fill="none" stroke="#ff7b00" stroke-width="2" stroke-opacity="0" style="transition:stroke-opacity 0.5s ease"/>
+              <!-- Center dot -->
+              <circle r="3" fill="#ff7b00"/>
+              <!-- Hands -->
+              <line id="rocket-hour"   x1="0" y1="0" x2="0" y2="-28" stroke="#ff7b00" stroke-width="3"   stroke-linecap="round"/>
+              <line id="rocket-minute" x1="0" y1="0" x2="0" y2="-38" stroke="#ffcc00" stroke-width="2"   stroke-linecap="round"/>
+              <line id="rocket-second" x1="0" y1="4" x2="0" y2="-44" stroke="#ff3060" stroke-width="1"   stroke-linecap="round"/>
+              <circle r="2" fill="#ff3060"/>
+              <!-- Slow label (appears at high gamma) -->
+              <text id="slow-label" x="0" y="20" text-anchor="middle" font-family="'Share Tech Mono',monospace" font-size="7" fill="#ff7b00" opacity="0">TIME DILATED</text>
+            </svg>
+          </div>
+          <div class="clock-digital rocket-clk" id="rocket-digital">00:00:00.0</div>
+          <div class="clock-sub" id="rocket-clock-sub">Dilated Time Flow</div>
+          <div class="diverge-bar-wrap">
+            <div class="diverge-bar-track">
+              <div class="diverge-bar-fill" id="rocket-bar" style="width:50%; background:linear-gradient(90deg,#ff7b00,#ff3060)"></div>
+            </div>
+            <div class="diverge-label">RELATIVE PROGRESS</div>
+          </div>
+        </div>
+
+      </div><!-- /twin-wrap -->
+    </div><!-- /twin-card -->
+
+  </div><!-- /grid -->
+
+  <div class="info-row">
+    <div class="info-chip"><span class="chip-label">Formula</span>&nbsp;<span class="chip-val">t' = t / γ</span></div>
+    <div class="info-chip"><span class="chip-label">v = 0.5c</span>&nbsp;<span class="chip-val">γ ≈ 1.15×</span></div>
+    <div class="info-chip"><span class="chip-label">v = 0.9c</span>&nbsp;<span class="chip-val">γ ≈ 2.29×</span></div>
+    <div class="info-chip"><span class="chip-label">v = 0.99c</span>&nbsp;<span class="chip-val">γ ≈ 7.09×</span></div>
+    <div class="info-chip"><span class="chip-label">v = 0.999c</span>&nbsp;<span class="chip-val">γ ≈ 22.4×</span></div>
+  </div>
+
+</div><!-- /wrapper -->
+
+<div id="toast"></div>
+
+<script>
+/* ════════════════════════════════════════
+   BUILD SCENE DECORATIONS
+════════════════════════════════════════ */
+const scene = document.getElementById('scene');
+
+// Stars
+for (let i = 0; i < 45; i++) {
+  const s = document.createElement('div');
+  const sz = Math.random() * 2.2 + 0.4;
+  Object.assign(s.style, {
+    position:'absolute', borderRadius:'50%', background:'#fff',
+    width: sz+'px', height: sz+'px',
+    top:  (Math.random()*100)+'%',
+    left: (Math.random()*100)+'%',
+    opacity: (Math.random()*0.6+0.2).toString(),
+    animation: `tw ${1+Math.random()*3}s ease-in-out ${Math.random()*2}s infinite alternate`
+  });
+  scene.appendChild(s);
+}
+
+// Speed streaks
+for (let i = 0; i < 9; i++) {
+  const l = document.createElement('div');
+  l.className = 'streak';
+  const dur  = (0.35 + Math.random()*0.5)+'s';
+  const del  = (Math.random()*0.9)+'s';
+  const w    = (50 + Math.random()*120)+'px';
+  Object.assign(l.style, {
+    top: (10 + Math.random()*140)+'px',
+    width: w,
+    '--dur': dur, '--delay': del
+  });
+  scene.appendChild(l);
+}
+
+// Inject star twinkle keyframe
+document.head.insertAdjacentHTML('beforeend',
+  `<style>@keyframes tw{from{opacity:.15;transform:scale(.7)} to{opacity:.95;transform:scale(1.3)}}</style>`
+);
+
+/* ════════════════════════════════════════
+   ROCKET MOVEMENT (rAF loop)
+════════════════════════════════════════ */
+const rocketWrap = document.getElementById('rocket-wrap');
+let rocketX   = 12;   // % of scene width
+let rocketVel = 0;
+let curMode   = 'idle';
+
+// Position exhaust dots relative to rocket
+const exDots = [
+  document.getElementById('ex1'), document.getElementById('ex2'),
+  document.getElementById('ex3'), document.getElementById('ex4')
+];
+
+function rAF() {
+  if (curMode === 'accelerate') {
+    rocketVel = Math.min(rocketVel + 0.07, 0.55);
+  } else if (curMode === 'constant') {
+    rocketVel += (0.18 - rocketVel) * 0.04;
+  } else if (curMode === 'decelerate') {
+    rocketVel = Math.max(rocketVel - 0.07, 0);
+  } else if (curMode === 'reset') {
+    rocketVel = 0;
+    rocketX   = 5;
+  } else {
+    rocketVel *= 0.95;
+  }
+
+  if (curMode !== 'reset') {
+    rocketX += rocketVel;
+    if (rocketX > 92) rocketX = -18; // loop — rocket 160px wide so exit earlier
+  }
+
+  rocketWrap.style.left = rocketX + '%';
+
+  // Exhaust dots sit just LEFT of the rocket nozzle
+  exDots.forEach((d, i) => {
+    d.style.left = `calc(${rocketX}% - ${8 + i * 11}px)`;
+  });
+
+  requestAnimationFrame(rAF);
+}
+requestAnimationFrame(rAF);
+
+/* ════════════════════════════════════════
+   CHART
+════════════════════════════════════════ */
+const MAX_PTS = 50;
+const labels = [], diffData = [];
+const chart = new Chart(
+  document.getElementById('timeDiffChart').getContext('2d'),
+  {
+    type: 'line',
+    data: { labels, datasets: [{
+      label: 'Δt (Earth − Relativistic)',
+      data: diffData,
+      borderColor: '#00b4ff', backgroundColor: 'rgba(0,180,255,0.06)',
+      borderWidth: 2, pointRadius: 0, pointHoverRadius: 4,
+      pointHoverBackgroundColor: '#00ffe5', tension: 0.4, fill: true,
+    }]},
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: false,
+      interaction: { mode:'index', intersect:false },
+      plugins: {
+        legend: { labels: { color:'#4a6a8a', font:{ family:'Share Tech Mono', size:10 }, boxWidth:14 } },
+        tooltip: {
+          backgroundColor:'#07111e', borderColor:'#0d2540', borderWidth:1,
+          titleColor:'#00b4ff', bodyColor:'#c8dff5',
+          titleFont:{ family:'Share Tech Mono', size:10 },
+          bodyFont: { family:'Share Tech Mono', size:11 },
+          callbacks:{ label: c => ` Δt = ${c.parsed.y.toFixed(4)}s` }
+        }
+      },
+      scales: {
+        x: { ticks:{ color:'#2a4a6a', font:{family:'Share Tech Mono',size:8}, maxRotation:0, maxTicksLimit:6 }, grid:{color:'rgba(13,37,64,0.6)'}, border:{color:'#0d2540'} },
+        y: { ticks:{ color:'#2a4a6a', font:{family:'Share Tech Mono',size:9}, callback:v=>v.toFixed(3)+'s' }, grid:{color:'rgba(13,37,64,0.6)'}, border:{color:'#0d2540'} }
+      }
+    }
+  }
+);
+
+let sampleN = 0;
+function pushGraph(diff) {
+  labels.push(++sampleN); diffData.push(diff);
+  if (labels.length > MAX_PTS) { labels.shift(); diffData.shift(); }
+  chart.update('none');
+}
+
+/* ════════════════════════════════════════
+   UI STATE
+════════════════════════════════════════ */
+function updateDisplay(id, val) {
+  const el = document.getElementById(id);
+  if (el) el.textContent = val;
+}
+
+const MODE_META = {
+  accelerate: { label:'ACC',   cls:'acc'   },
+  constant:   { label:'CONST', cls:'const' },
+  decelerate: { label:'DEC',   cls:'dec'   },
+  reset:      { label:'IDLE',  cls:'idle'  },
+};
+const BTN_IDS = {
+  accelerate:'btn-start', constant:'btn-stop',
+  decelerate:'btn-back',  reset:'btn-reset',
+};
+const SCENE_CLS = {
+  accelerate:'mode-acc', constant:'mode-const',
+  decelerate:'mode-dec', reset:'mode-reset',
+};
+
+function updateMode(cmd) {
+  const m = MODE_META[cmd] || { label: cmd.toUpperCase(), cls:'idle' };
+
+  // badge
+  const badge = document.getElementById('mode-badge');
+  badge.textContent = m.label;
+  badge.className = `mode-badge ${m.cls}`;
+
+  // buttons
+  Object.values(BTN_IDS).forEach(id => document.getElementById(id)?.classList.remove('active'));
+  if (BTN_IDS[cmd]) document.getElementById(BTN_IDS[cmd])?.classList.add('active');
+
+  // scene class → triggers CSS rocket/flame/streak animations
+  scene.className = `scene ${SCENE_CLS[cmd] || 'mode-idle'}`;
+  curMode = cmd;
+
+  if (cmd === 'reset') {
+    setTimeout(() => {
+      curMode = 'idle';
+      scene.className = 'scene mode-idle';
+    }, 650);
+  }
+}
+
+function handleCommand(cmd) {
+  updateMode(cmd);
+  if (typeof window.sendCommand === 'function') window.sendCommand(cmd);
+  showToast(`→ ${cmd.toUpperCase()}`);
+}
+
+/* ════════════════════════════════════════
+   TOAST
+════════════════════════════════════════ */
+let tTimer = null;
+function showToast(msg, type='') {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.className = 'show' + (type==='error' ? ' error' : '');
+  clearTimeout(tTimer);
+  tTimer = setTimeout(() => { el.className = ''; }, 2200);
+}
+
+/* ════════════════════════════════════════
+   CONNECTION STATUS
+════════════════════════════════════════ */
+let connected = false;
+function setConnected(state) {
+  if (connected === state) return;
+  connected = state;
+  const dot  = document.getElementById('conn-dot');
+  const text = document.getElementById('conn-text');
+  if (state) {
+    dot.className  = 'conn-dot live';
+    text.textContent = 'ESP32 LIVE';
+  } else {
+    dot.className  = 'conn-dot waiting';
+    text.textContent = 'WAITING FOR ESP32';
+  }
+}
+
+// If no data arrives within 4s after page load → show disconnected
+setTimeout(() => { if (!connected) setConnected(false); }, 4000);
+
+/* ════════════════════════════════════════
+   TWIN PARADOX CLOCKS
+════════════════════════════════════════ */
+
+// Generate tick marks on both clock faces
+function buildTicks(groupId, majorColor, minorColor) {
+  const g = document.getElementById(groupId);
+  for (let i = 0; i < 60; i++) {
+    const angle = (i / 60) * 360;
+    const isMajor = i % 5 === 0;
+    const r1 = isMajor ? 38 : 42;
+    const r2 = 48;
+    const rad = (angle - 90) * Math.PI / 180;
+    const x1 = Math.cos(rad) * r1, y1 = Math.sin(rad) * r1;
+    const x2 = Math.cos(rad) * r2, y2 = Math.sin(rad) * r2;
+    const line = document.createElementNS('http://www.w3.org/2000/svg','line');
+    line.setAttribute('x1', x1); line.setAttribute('y1', y1);
+    line.setAttribute('x2', x2); line.setAttribute('y2', y2);
+    line.setAttribute('stroke', isMajor ? majorColor : minorColor);
+    line.setAttribute('stroke-width', isMajor ? '1.5' : '0.5');
+    line.setAttribute('stroke-opacity', isMajor ? '0.7' : '0.25');
+    g.appendChild(line);
+  }
+  // Hour numbers
+  [12,3,6,9].forEach((n, i) => {
+    const a = (i * 90 - 90) * Math.PI / 180;
+    const tx = Math.cos(a) * 32, ty = Math.sin(a) * 32;
+    const txt = document.createElementNS('http://www.w3.org/2000/svg','text');
+    txt.setAttribute('x', tx); txt.setAttribute('y', ty);
+    txt.setAttribute('text-anchor','middle');
+    txt.setAttribute('dominant-baseline','central');
+    txt.setAttribute('font-family',"'Share Tech Mono',monospace");
+    txt.setAttribute('font-size','7');
+    txt.setAttribute('fill', majorColor);
+    txt.setAttribute('opacity','0.6');
+    txt.textContent = n;
+    g.appendChild(txt);
+  });
+}
+
+buildTicks('earth-ticks',  '#00b4ff', '#00b4ff');
+buildTicks('rocket-ticks', '#ff7b00', '#ff7b00');
+
+// Rotate a clock hand given seconds-equivalent angle
+function rotateHand(id, deg) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.setAttribute('transform', `rotate(${deg})`);
+}
+
+// Format seconds → HH:MM:SS.d
+function formatTime(totalSec) {
+  if (isNaN(totalSec) || totalSec < 0) totalSec = 0;
+  const h  = Math.floor(totalSec / 3600);
+  const m  = Math.floor((totalSec % 3600) / 60);
+  const s  = Math.floor(totalSec % 60);
+  const ds = Math.floor((totalSec * 10) % 10);
+  return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}.${ds}`;
+}
+
+// Update both clocks from latest Firebase values
+function updateTwinClocks(earthSec, rocketSec) {
+  if (isNaN(earthSec))  earthSec  = 0;
+  if (isNaN(rocketSec)) rocketSec = 0;
+
+  // ── Earth clock hands ──────────────────
+  const eSec = earthSec % 60;
+  const eMin = (earthSec % 3600) / 60;
+  const eHr  = (earthSec % 43200) / 3600;
+  rotateHand('earth-second', eSec  * 6);
+  rotateHand('earth-minute', eMin  * 6);
+  rotateHand('earth-hour',   eHr   * 30);
+
+  // ── Rocket clock hands ─────────────────
+  const rSec = rocketSec % 60;
+  const rMin = (rocketSec % 3600) / 60;
+  const rHr  = (rocketSec % 43200) / 3600;
+  rotateHand('rocket-second', rSec  * 6);
+  rotateHand('rocket-minute', rMin  * 6);
+  rotateHand('rocket-hour',   rHr   * 30);
+
+  // ── Digital displays ───────────────────
+  document.getElementById('earth-digital').textContent  = formatTime(earthSec);
+  document.getElementById('rocket-digital').textContent = formatTime(rocketSec);
+
+  // ── Delta ──────────────────────────────
+  const delta = earthSec - rocketSec;
+  const deltaEl = document.getElementById('twin-delta');
+  deltaEl.textContent = (delta >= 0 ? '+' : '') + delta.toFixed(3);
+  // Color hint — bigger delta = more purple
+  const intensity = Math.min(delta / 30, 1);
+  deltaEl.style.color = `hsl(${270 + intensity * 30}, 80%, ${65 + intensity * 15}%)`;
+
+  // ── Divergence bars ────────────────────
+  // Earth bar stays at 100%, rocket bar shrinks relative to earth
+  const ratio = earthSec > 0 ? Math.min(rocketSec / earthSec, 1) : 1;
+  document.getElementById('earth-bar').style.width  = '100%';
+  document.getElementById('rocket-bar').style.width = (ratio * 100).toFixed(1) + '%';
+
+  // ── Dilation ring glow ─────────────────
+  // Pulses brighter the higher gamma is
+  const gammaNow = parseFloat(document.getElementById('val-gamma').textContent) || 1;
+  const glowOpacity = Math.min((gammaNow - 1) / 5, 0.9).toFixed(2);
+  const ring = document.getElementById('dilation-ring');
+  if (ring) ring.setAttribute('stroke-opacity', glowOpacity);
+
+  // ── "TIME DILATED" label on rocket clock ──
+  const slowLabel = document.getElementById('slow-label');
+  if (slowLabel) slowLabel.setAttribute('opacity', gammaNow > 1.5 ? '0.8' : '0');
+
+  // ── Rocket clock sub text ──────────────
+  const subEl = document.getElementById('rocket-clock-sub');
+  if (subEl) {
+    if (gammaNow >= 2)       subEl.textContent = `γ=${gammaNow.toFixed(2)}× slower`;
+    else if (gammaNow > 1.1) subEl.textContent = `Slightly dilated`;
+    else                     subEl.textContent = `Dilated Time Flow`;
+  }
+}
+
+/* Keyboard shortcuts */
+document.addEventListener('keydown', e => {
+  ({a:'accelerate',s:'constant',d:'decelerate',r:'reset'})[e.key] &&
+  handleCommand({a:'accelerate',s:'constant',d:'decelerate',r:'reset'}[e.key]);
+});
+</script>
+</body>
+</html>
