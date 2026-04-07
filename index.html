@@ -14,16 +14,15 @@
   import { getDatabase, ref, set, onValue } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
 
   // 🔧 PASTE YOUR FIREBASE CONFIG HERE
- const firebaseConfig = {
-  apiKey: "AIzaSyDC4ANJ7A2b0ZlMbZb6KvqU0rtxkejs84Q",
-  authDomain: "relativity-simulator.firebaseapp.com",
-  databaseURL: "https://relativity-simulator-default-rtdb.asia-southeast1.firebasedatabase.app",
-  projectId: "relativity-simulator",
-  storageBucket: "relativity-simulator.firebasestorage.app",
-  messagingSenderId: "526676250030",
-  appId: "1:526676250030:web:4ddeda9f7b2bc099d08c3f",
-  measurementId: "G-W1H7YH590R"
-};
+  const firebaseConfig = {
+    apiKey: "YOUR_API_KEY",
+    authDomain: "YOUR_PROJECT.firebaseapp.com",
+    databaseURL: "https://YOUR_PROJECT-default-rtdb.firebaseio.com",
+    projectId: "YOUR_PROJECT",
+    storageBucket: "YOUR_PROJECT.appspot.com",
+    messagingSenderId: "YOUR_SENDER_ID",
+    appId: "YOUR_APP_ID"
+  };
 
   const app = initializeApp(firebaseConfig);
   const db  = getDatabase(app);
@@ -993,7 +992,7 @@ const chart = new Chart(
       data: diffData,
       borderColor: '#00b4ff', backgroundColor: 'rgba(0,180,255,0.06)',
       borderWidth: 2, pointRadius: 0, pointHoverRadius: 4,
-      pointHoverBackgroundColor: '#00ffe5', tension: 0.4, fill: true,
+      pointHoverBackgroundColor: '#00ffe5', tension: 0, fill: true,
     }]},
     options: {
       responsive: true, maintainAspectRatio: false, animation: false,
@@ -1010,16 +1009,33 @@ const chart = new Chart(
       },
       scales: {
         x: { ticks:{ color:'#2a4a6a', font:{family:'Share Tech Mono',size:8}, maxRotation:0, maxTicksLimit:6 }, grid:{color:'rgba(13,37,64,0.6)'}, border:{color:'#0d2540'} },
-        y: { ticks:{ color:'#2a4a6a', font:{family:'Share Tech Mono',size:9}, callback:v=>v.toFixed(3)+'s' }, grid:{color:'rgba(13,37,64,0.6)'}, border:{color:'#0d2540'} }
+        y: { min: 0, ticks:{ color:'#2a4a6a', font:{family:'Share Tech Mono',size:9}, callback:v=>v.toFixed(3)+'s' }, grid:{color:'rgba(13,37,64,0.6)'}, border:{color:'#0d2540'} }
       }
     }
   }
 );
 
 let sampleN = 0;
+let lastDelta = 0; // track last value — delta should only increase
+
 function pushGraph(diff) {
-  labels.push(++sampleN); diffData.push(diff);
+  // Delta should ONLY grow — clamp to last value if ESP32 sends something lower
+  // This prevents the oscillating wave pattern
+  const safeDiff = Math.max(diff, lastDelta);
+  lastDelta = safeDiff;
+
+  labels.push(++sampleN);
+  diffData.push(safeDiff);
   if (labels.length > MAX_PTS) { labels.shift(); diffData.shift(); }
+  chart.update('none');
+}
+
+// Reset graph delta tracker when reset command received
+function resetGraph() {
+  lastDelta = 0;
+  sampleN = 0;
+  labels.length = 0;
+  diffData.length = 0;
   chart.update('none');
 }
 
@@ -1063,6 +1079,7 @@ function updateMode(cmd) {
   curMode = cmd;
 
   if (cmd === 'reset') {
+    resetGraph(); // clear graph and reset delta tracker
     setTimeout(() => {
       curMode = 'idle';
       scene.className = 'scene mode-idle';
